@@ -9,13 +9,19 @@ use error::RequestError;
 
 use esp_backtrace as _;
 
-use esp_println::println;
 use core::str::{self, FromStr};
+use esp_println::println;
 use heapless::String;
+use log::error;
 use serde::Deserialize;
 
 use cu40026::{interface::SerialInterface, CursorType, Display};
 use embassy_executor::Spawner;
+use embassy_net::{
+    dns::DnsSocket,
+    tcp::client::{TcpClient, TcpClientState},
+    DhcpConfig, Stack, StackResources,
+};
 use embassy_time::{Duration, Timer};
 use esp_hal::{
     clock::ClockControl,
@@ -34,9 +40,6 @@ use esp_wifi::{
         WifiState,
     },
     EspWifiInitFor,
-};
-use embassy_net::{
-    dns::DnsSocket, tcp::client::{TcpClient, TcpClientState}, DhcpConfig, Stack, StackResources
 };
 use reqwless::{
     client::{HttpClient, TlsConfig},
@@ -113,7 +116,6 @@ async fn main(spawner: Spawner) {
         )
     );
 
-
     spawner.spawn(connection_task(controller, stack)).ok();
     spawner.spawn(net_task(stack)).ok();
     spawner.spawn(display_task(stack, display, tls_seed)).ok();
@@ -126,8 +128,8 @@ async fn connection_task(
 ) {
     loop {
         if esp_wifi::wifi::get_wifi_state() == WifiState::StaConnected {
-                controller.wait_for_event(WifiEvent::StaDisconnected).await;
-                Timer::after(Duration::from_millis(5000)).await
+            controller.wait_for_event(WifiEvent::StaDisconnected).await;
+            Timer::after(Duration::from_millis(5000)).await
         }
 
         if !matches!(controller.is_started(), Ok(true)) {
@@ -147,7 +149,10 @@ async fn connection_task(
                 println!("Wi-Fi connected!");
 
                 stack.wait_config_up().await;
-                println!("Got IP: {:?}", stack.config_v4().unwrap().address.address().0);
+                println!(
+                    "Got IP: {:?}",
+                    stack.config_v4().unwrap().address.address().0
+                );
             }
             Err(e) => {
                 println!("Failed to connect to wifi: {e:?}");
@@ -211,7 +216,7 @@ async fn display_task(
     display
         .set_cursor_type(CursorType::InvisibleCursor)
         .unwrap();
-    display.set_luminance(100).unwrap();
+    display.set_luminance(DEFAULT_LUMINANCE).unwrap();
 
     stack.wait_config_up().await;
 
@@ -234,11 +239,33 @@ async fn display_task(
 
     let mut buf = [0u8; 4096];
     loop {
+        let mut url: String<512> = String::new();
+
+        // Update luminance
+        if let Some(luminance_entity) = LUMINANCE_ENTITY {
+            url.push_str(HA_API_URL).expect("HA API URL too long");
+            url.push_str(luminance_entity).expect("HA API URL too long");
+
+            match get_entity_state(&mut client, &mut buf, url.as_str()).await {
+                Ok(entity_state) => {
+                    let luminance: u8 = entity_state
+                        .parse::<f32>()
+                        .expect("Could not parse luminance")
+                        as u8;
+                    display.set_luminance(luminance).unwrap();
+                }
+                Err(err) => {
+                    error!("{:?}", err);
+                }
+            }
+        }
+
+        // Update entities
         for i in 0..NUM_ENTITIES {
             let entity = &ENTITIES[i];
             let old_text_length = &mut entity_text_lengths[i];
 
-            let mut url: String<512> = String::new();
+            url.clear();
             url.push_str(HA_API_URL).expect("HA API URL too long");
             url.push_str(entity.entity_name)
                 .expect("HA API URL too long");
@@ -263,7 +290,8 @@ async fn display_task(
                     display.write_str(entity_state).unwrap();
                     display.write_bytes(entity.display_unit).unwrap();
                 }
-                Err(_) => {
+                Err(err) => {
+                    error!("{:?}", err);
                     new_text_length = entity.display_name.len() + 2 + 3;
                     display.write_str("ERR").unwrap();
                 }

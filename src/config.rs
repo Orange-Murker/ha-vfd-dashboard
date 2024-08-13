@@ -7,7 +7,6 @@ pub const PASS: &str = "<Wi-Fi Password>";
 pub const HA_API_URL: &str = "https://yourhomeassistantinstance.com/api/states/";
 pub const TOKEN: &str = "Bearer <Home Assistant Token>";
 
-
 pub const NUM_ENTITIES: usize = 5;
 pub const ENTITIES: [Entity; NUM_ENTITIES] = [
     Entity {
@@ -43,3 +42,6 @@ pub const ENTITIES: [Entity; NUM_ENTITIES] = [
 ];
 
 pub const REFRESH_EVERY: Duration = Duration::from_millis(5000);
+
+pub const DEFAULT_LUMINANCE: u8 = 100;
+pub const LUMINANCE_ENTITY: Option<&str> = Some("input_number.luminance");
