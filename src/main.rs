@@ -12,7 +12,7 @@ use esp_backtrace as _;
 use core::str::{self, FromStr};
 use esp_println::println;
 use heapless::String;
-use log::error;
+use log::{error, info};
 use serde::Deserialize;
 
 use cu40026::{interface::SerialInterface, CursorType, Display};
@@ -24,13 +24,13 @@ use embassy_net::{
 };
 use embassy_time::{Duration, Timer};
 use esp_hal::{
-    clock::ClockControl,
     gpio::Io,
-    peripherals::Peripherals,
     prelude::*,
     rng::Rng,
-    system::SystemControl,
-    timer::{systimer::SystemTimer, timg::TimerGroup, ErasedTimer, OneShotTimer, PeriodicTimer},
+    timer::{
+        systimer::{SystemTimer, Target},
+        timg::TimerGroup,
+    },
     uart::{self, UartTx},
     Blocking,
 };
@@ -46,6 +46,9 @@ use reqwless::{
     request::{Method, RequestBuilder},
 };
 
+extern crate alloc;
+use esp_alloc as _;
+
 macro_rules! mk_static {
     ($t:ty,$val:expr) => {{
         static STATIC_CELL: static_cell::StaticCell<$t> = static_cell::StaticCell::new();
@@ -57,43 +60,39 @@ macro_rules! mk_static {
 
 #[esp_hal::macros::main]
 async fn main(spawner: Spawner) {
+    esp_alloc::heap_allocator!(72 * 1024);
+
     esp_println::logger::init_logger_from_env();
 
-    let peripherals = Peripherals::take();
-    let system = SystemControl::new(peripherals.SYSTEM);
-    let clocks = ClockControl::max(system.clock_control).freeze();
+    let peripherals = esp_hal::init({
+        let mut config = esp_hal::Config::default();
+        config.cpu_clock = CpuClock::max();
+        config
+    });
 
     let io = Io::new(peripherals.GPIO, peripherals.IO_MUX);
 
-    let timg0 = TimerGroup::new(peripherals.TIMG0, &clocks, None);
-    let timer0: ErasedTimer = timg0.timer0.into();
-    let timer = PeriodicTimer::new(timer0);
-
-    let systimer = SystemTimer::new(peripherals.SYSTIMER);
-    let alarm0: ErasedTimer = systimer.alarm0.into();
-    let timers = [OneShotTimer::new(alarm0)];
-    let timers = mk_static!([OneShotTimer<ErasedTimer>; 1], timers);
+    let systimer = SystemTimer::new(peripherals.SYSTIMER).split::<Target>();
 
     let mut rng = Rng::new(peripherals.RNG);
     let net_seed = rng.random() as u64 | ((rng.random() as u64) << 32);
     let tls_seed = rng.random() as u64 | ((rng.random() as u64) << 32);
 
-    esp_hal_embassy::init(&clocks, timers);
+    esp_hal_embassy::init(systimer.alarm0);
 
     let uart_config = uart::config::Config::default()
         .baudrate(19200)
         .parity_even();
-    let tx = UartTx::new_with_config(peripherals.UART1, uart_config, &clocks, None, io.pins.gpio4)
-        .unwrap();
+    let tx = UartTx::new_with_config(peripherals.UART1, uart_config, io.pins.gpio4).unwrap();
     let serial_interface = SerialInterface::new(tx);
     let display = cu40026::Display::new(serial_interface);
 
-    let wifi_init = esp_wifi::initialize(
+    let timg0 = TimerGroup::new(peripherals.TIMG0);
+    let wifi_init = esp_wifi::init(
         EspWifiInitFor::Wifi,
-        timer,
+        timg0.timer0,
         rng,
         peripherals.RADIO_CLK,
-        &clocks,
     )
     .unwrap();
     let wifi = peripherals.WIFI;
@@ -188,12 +187,14 @@ async fn get_entity_state<'a>(
     buf: &'a mut [u8],
     url: &str,
 ) -> Result<&'a str, RequestError> {
+    info!("Requesting {}", url);
     let mut request = client
         .request(Method::GET, url)
         .await?
         .headers(&[("Authorization", TOKEN)]);
     let response = request.send(buf).await?;
 
+    info!("Got response");
     let res = response.body().read_to_end().await?;
 
     let str = str::from_utf8(res).map_err(RequestError::Utf8Error)?;
@@ -222,7 +223,7 @@ async fn display_task(
 
     let mut entity_text_lengths: [usize; NUM_ENTITIES] = [0; NUM_ENTITIES];
 
-    let dns = DnsSocket::new(stack);
+    let dns = DnsSocket::new(&stack);
     let tcp_state = TcpClientState::<1, 4096, 4096>::new();
     let tcp = TcpClient::new(stack, &tcp_state);
 
