@@ -24,7 +24,6 @@ use embassy_net::{
 };
 use embassy_time::{Duration, Timer};
 use esp_hal::{
-    gpio::Io,
     prelude::*,
     rng::Rng,
     timer::{
@@ -39,7 +38,7 @@ use esp_wifi::{
         ClientConfiguration, Configuration, WifiController, WifiDevice, WifiEvent, WifiStaDevice,
         WifiState,
     },
-    EspWifiInitFor,
+    EspWifiController,
 };
 use reqwless::{
     client::{HttpClient, TlsConfig},
@@ -70,8 +69,6 @@ async fn main(spawner: Spawner) {
         config
     });
 
-    let io = Io::new(peripherals.GPIO, peripherals.IO_MUX);
-
     let systimer = SystemTimer::new(peripherals.SYSTIMER).split::<Target>();
 
     let mut rng = Rng::new(peripherals.RNG);
@@ -80,21 +77,16 @@ async fn main(spawner: Spawner) {
 
     esp_hal_embassy::init(systimer.alarm0);
 
-    let uart_config = uart::config::Config::default()
-        .baudrate(19200)
-        .parity_even();
-    let tx = UartTx::new_with_config(peripherals.UART1, uart_config, io.pins.gpio4).unwrap();
+    let uart_config = uart::Config::default().baudrate(19200).parity_even();
+    let tx = UartTx::new_with_config(peripherals.UART1, uart_config, peripherals.GPIO4).unwrap();
     let serial_interface = SerialInterface::new(tx);
     let display = cu40026::Display::new(serial_interface);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
-    let wifi_init = esp_wifi::init(
-        EspWifiInitFor::Wifi,
-        timg0.timer0,
-        rng,
-        peripherals.RADIO_CLK,
-    )
-    .unwrap();
+    let wifi_init = &*mk_static!(
+        EspWifiController<'static>,
+        esp_wifi::init(timg0.timer0, rng, peripherals.RADIO_CLK,).unwrap()
+    );
     let wifi = peripherals.WIFI;
 
     let (wifi_interface, controller) =
@@ -126,7 +118,7 @@ async fn connection_task(
     stack: &'static Stack<WifiDevice<'static, WifiStaDevice>>,
 ) {
     loop {
-        if esp_wifi::wifi::get_wifi_state() == WifiState::StaConnected {
+        if esp_wifi::wifi::wifi_state() == WifiState::StaConnected {
             controller.wait_for_event(WifiEvent::StaDisconnected).await;
             Timer::after(Duration::from_millis(5000)).await
         }
@@ -139,11 +131,11 @@ async fn connection_task(
             });
             controller.set_configuration(&client_config).unwrap();
             println!("Starting Wi-Fi");
-            controller.start().await.unwrap();
+            controller.start_async().await.unwrap();
         }
         println!("Connecting...");
 
-        match controller.connect().await {
+        match controller.connect_async().await {
             Ok(_) => {
                 println!("Wi-Fi connected!");
 
@@ -209,7 +201,7 @@ async fn get_entity_state<'a>(
 #[embassy_executor::task]
 async fn display_task(
     stack: &'static Stack<WifiDevice<'static, WifiStaDevice>>,
-    mut display: Display<SerialInterface<UartTx<'static, esp_hal::peripherals::UART1, Blocking>>>,
+    mut display: Display<SerialInterface<UartTx<'static, Blocking>>>,
     tls_seed: u64,
 ) {
     display.initialise().unwrap();

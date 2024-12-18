@@ -12,7 +12,6 @@ rustflags = [
   # NOTE: May negatively impact performance of produced code
   "-C", "force-frame-pointers",
   "-C", "link-arg=-Tlinkall.x",
-  "-C", "link-arg=-Trom_functions.x",
 ]
 
 target = "riscv32imc-unknown-none-elf"
